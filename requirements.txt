@@ -26,6 +26,6 @@ smplx
 test-tube==0.7.5
 torch_optimizer
 torch==1.13.1
-torchvision==0.8.2
+torchvision
 trimesh
 trimesh==3.9.1

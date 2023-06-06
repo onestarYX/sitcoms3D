@@ -502,7 +502,9 @@ class Sitcom3DDataset(RenderDataset):
         elif self.split in ['val', 'test_train']:
             sample = {}
             if self.split == 'val':
-                id_ = self.val_id
+                # id_ self.val_id
+                val_img_idx = np.random.randint(0, len(self.image_filenames))
+                id_ = self.image_path_to_id[self.image_filenames[val_img_idx]]
             else:
                 id_ = idx_or_id
             sample['c2w'] = c2w = torch.FloatTensor(self.get_pose(id_))

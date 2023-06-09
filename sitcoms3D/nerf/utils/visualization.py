@@ -28,11 +28,11 @@ def np_visualize_depth(depth, normalization=None, cmap=cv2.COLORMAP_JET):
     # except:
     #     pass
     x = (255 * x).astype("uint8")
-    x_ = cv2.applyColorMap(x, cmap)
-    x_[mask] = 0
-    assert x_.dtype == "uint8"
-    x_ = Image.fromarray(x_)
-    return x_
+    # x_ = cv2.applyColorMap(x, cmap)
+    x[mask] = 0
+    assert x.dtype == "uint8"
+    # x_ = Image.fromarray(x_)
+    return x
 
 
 def visualize_depth(depth, cmap=cv2.COLORMAP_JET):

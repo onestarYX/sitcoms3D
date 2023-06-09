@@ -394,7 +394,7 @@ class Sitcom3DDataset(RenderDataset):
 
             print("max_far")
             print(max_far)
-            self.scale_factor = max_far / 5  # so that the max far is scaled to 5
+            self.scale_factor = max_far / 5  # so that the max far is scaled to 5   #TODO: figure out what this scale_factor is doing
             self.poses[..., 3] /= self.scale_factor
             self.xyz_world /= self.scale_factor
             self.bbox /= self.scale_factor
@@ -423,7 +423,7 @@ class Sitcom3DDataset(RenderDataset):
                     c2w = torch.FloatTensor(self.get_pose(id_))
                     img = self.get_img(id_)
                     img_h, img_w, _ = img.shape
-                    mask = self.get_mask(id_)
+                    mask = self.get_mask(id_).astype(float)
                     img = self.transform(img)  # (3, h, w)
                     img = img.view(3, -1).permute(1, 0)  # (h*w, 3) RGB
                     mask = self.transform(mask)
@@ -502,7 +502,7 @@ class Sitcom3DDataset(RenderDataset):
         elif self.split in ['val', 'test_train']:
             sample = {}
             if self.split == 'val':
-                # id_ self.val_id
+                # id_ = self.val_id
                 val_img_idx = np.random.randint(0, len(self.image_filenames))
                 id_ = self.image_path_to_id[self.image_filenames[val_img_idx]]
             else:

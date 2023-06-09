@@ -139,7 +139,8 @@ if __name__ == '__main__':
         img_static_ = (img_static * 255).astype(np.uint8)
 
         depth_static = np.array(np_visualize_depth(results['depth_fine_static_med'].cpu().numpy(), cmap=cv2.COLORMAP_BONE))
-        depth_static_ = depth_static.reshape(h, w, 3)
+        depth_static = depth_static.reshape(h, w, 1)
+        depth_static_ = np.repeat(depth_static, 3, axis=2)
 
         row1 = np.concatenate([img_gt_, img_pred_], axis=1)
         row2 = np.concatenate([img_static_, depth_static_], axis=1)

@@ -439,8 +439,8 @@ class NeRFSystem(LightningModule):
             vis_data.update(results)
             vis_data["rgbs"] = rgbs
             vis_data["img_wh"] = [W, H]
-            image = get_image_summary_from_vis_data(vis_data)
-            self.logger.experiment.add_image('val/GT_pred_depth', image, self.global_step)
+            # image = get_image_summary_from_vis_data(vis_data)
+            # self.logger.experiment.add_image('val/GT_pred_depth', image, self.global_step)
 
         psnr_ = psnr(results[f'rgb_{typ}'], rgbs)
         log['val_psnr'] = psnr_

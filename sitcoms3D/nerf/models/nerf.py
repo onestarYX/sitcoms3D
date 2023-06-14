@@ -36,6 +36,7 @@ class NeRF(nn.Module):
                  in_channels_xyz=63, in_channels_dir=27,
                  encode_appearance=False, in_channels_a=48,
                  encode_transient=False, in_channels_t=16,
+                 predict_label=False, num_classes=80,
                  beta_min=0.03,
                  use_view_dirs=True):
         """
@@ -64,11 +65,13 @@ class NeRF(nn.Module):
         self.in_channels_dir = in_channels_dir
         self.use_view_dirs = use_view_dirs
 
-        self.encode_appearance = False if typ=='coarse' else encode_appearance
+        # self.encode_appearance = False if typ=='coarse' else encode_appearance
+        self.encode_appearance = encode_appearance
         self.in_channels_a = in_channels_a if encode_appearance else 0
         self.encode_transient = False if typ=='coarse' else encode_transient
         self.in_channels_t = in_channels_t
         self.beta_min = beta_min
+        self.predict_label = predict_label
 
         # xyz encoding layers
         for i in range(D):
@@ -93,6 +96,8 @@ class NeRF(nn.Module):
         # static output layers
         self.static_sigma = nn.Sequential(nn.Linear(W, 1), nn.Softplus())
         self.static_rgb = nn.Sequential(nn.Linear(W//2, 3), nn.Sigmoid())
+        if self.predict_label:
+            self.static_label = nn.Linear(W, num_classes)
 
         if self.encode_transient:
             # transient encoding layers
@@ -105,6 +110,8 @@ class NeRF(nn.Module):
             self.transient_sigma = nn.Sequential(nn.Linear(W//2, 1), nn.Softplus())
             self.transient_rgb = nn.Sequential(nn.Linear(W//2, 3), nn.Sigmoid())
             self.transient_beta = nn.Sequential(nn.Linear(W//2, 1), nn.Softplus())
+            if self.predict_label:
+                self.transient_label = nn.Linear(W//2, num_classes)
 
     def forward(self, x, sigma_only=False, output_transient=True):
         """
@@ -156,7 +163,12 @@ class NeRF(nn.Module):
             dir_encoding_input = torch.cat([xyz_encoding_final, input_dir_a[:,self.in_channels_dir:]], 1)
             dir_encoding = self.dir_encoding(dir_encoding_input)
             static_rgb = self.static_rgb(dir_encoding) # (B, 3)
-        static = torch.cat([static_rgb, static_sigma], 1) # (B, 4)
+
+        if self.predict_label:
+            static_label = self.static_label(xyz_)  # (B, num_classes)
+            static = torch.cat([static_rgb, static_sigma, static_label], 1) # (B, 4 + num_classes)
+        else:
+            static = torch.cat([static_rgb, static_sigma], 1)  # (B, 4)
 
         if not output_transient:
             return static
@@ -166,8 +178,12 @@ class NeRF(nn.Module):
         transient_sigma = self.transient_sigma(transient_encoding) # (B, 1)
         transient_rgb = self.transient_rgb(transient_encoding) # (B, 3)
         transient_beta = self.transient_beta(transient_encoding) # (B, 1)
-
-        transient = torch.cat([transient_rgb, transient_sigma,
-                               transient_beta], 1) # (B, 5)
+        if self.predict_label:
+            transient_label = self.transient_label(transient_encoding)
+            transient = torch.cat([transient_rgb, transient_sigma,
+                                   transient_beta, transient_label], 1)  # (B, 5 + num_classes)
+        else:
+            transient = torch.cat([transient_rgb, transient_sigma,
+                                   transient_beta], 1) # (B, 5)
 
         return torch.cat([static, transient], 1) # (B, 9)

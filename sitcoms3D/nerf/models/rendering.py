@@ -86,6 +86,8 @@ def render_rays(models,
                 embeddings,
                 rays,
                 ts,
+                predict_label,
+                num_classes=80,
                 N_samples=64,
                 use_disp=False,
                 perturb=0,
@@ -116,7 +118,8 @@ def render_rays(models,
         result: dictionary containing final rgb and depth maps for coarse and fine models
     """
 
-    def inference(results, model, xyz, z_vals, test_time=False, validation_version=False, **kwargs):
+    def inference(results, model, xyz, z_vals, predict_label=False, num_classes=80,
+                  test_time=False, validation_version=False, **kwargs):
         """
         Helper function that performs model inference.
         Inputs:
@@ -161,12 +164,22 @@ def render_rays(models,
 
             out = torch.cat(out_chunks, 0)
             out = rearrange(out, '(n1 n2) c -> n1 n2 c', n1=N_rays, n2=N_samples_)
-            static_rgbs = out[..., :3]  # (N_rays, N_samples_, 3)
-            static_sigmas = out[..., 3]  # (N_rays, N_samples_)
-            if output_transient:
-                transient_rgbs = out[..., 4:7]
-                transient_sigmas = out[..., 7]
-                transient_betas = out[..., 8]
+            if predict_label:
+                static_rgbs = out[..., :3]  # (N_rays, N_samples_, 3)
+                static_sigmas = out[..., 3]  # (N_rays, N_samples_)
+                static_labels = out[..., 4:4 + num_classes]  # (N_rays, num_classes)
+                if output_transient:
+                    transient_rgbs = out[..., 4 + num_classes:7 + num_classes]
+                    transient_sigmas = out[..., 7 + num_classes]
+                    transient_betas = out[..., 8 + num_classes]
+                    transient_labels = out[..., 9 + num_classes:]
+            else:
+                static_rgbs = out[..., :3]  # (N_rays, N_samples_, 3)
+                static_sigmas = out[..., 3]  # (N_rays, N_samples_)
+                if output_transient:
+                    transient_rgbs = out[..., 4:7]
+                    transient_sigmas = out[..., 7]
+                    transient_betas = out[..., 8]
 
         # Convert these values using volume rendering
         deltas = z_vals[:, 1:] - z_vals[:, :-1]  # (N_rays, N_samples_-1)
@@ -220,11 +233,20 @@ def render_rays(models,
             results['_rgb_fine_static'] = static_rgb_map
             results['_rgb_fine_transient'] = transient_rgb_map
             results['rgb_fine'] = static_rgb_map + transient_rgb_map
+            if predict_label:
+                static_label_map = reduce(rearrange(static_weights, 'n1 n2 -> n1 n2 1') * static_labels,
+                                    'n1 n2 c -> n1 c', 'sum')
+                transient_label_map = reduce(rearrange(transient_weights, 'n1 n2 -> n1 n2 1') * transient_labels,
+                                    'n1 n2 c -> n1 c', 'sum')
+                label_map_fine = static_label_map + transient_label_map
+                results['label_fine'] = label_map_fine
 
             if test_time or validation_version:
                 # Compute also static and transient rgbs when only one field exists.
                 # The result is different from when both fields exist, since the transimttance
                 # will change.
+                # This result is only needed during validation or testing, because during training,
+                # we don't have gt static/transient images for supervision.
                 static_alphas_shifted = \
                     torch.cat([torch.ones_like(static_alphas[:, :1]), 1 - static_alphas], -1)
                 static_transmittance = torch.cumprod(static_alphas_shifted[:, :-1], -1)
@@ -249,12 +271,23 @@ def render_rays(models,
                            'n1 n2 c -> n1 c', 'sum')
                 results['depth_fine_transient'] = \
                     reduce(transient_weights_ * z_vals, 'n1 n2 -> n1', 'sum')
+                if predict_label:
+                    static_label_map_ = reduce(rearrange(static_weights_, 'n1 n2 -> n1 n2 1') * static_labels,
+                                                          'n1 n2 c -> n1 c', 'sum')
+                    results['label_fine_static'] = static_label_map_
+                    transient_label_map_ = reduce(rearrange(transient_weights_, 'n1 n2 -> n1 n2 1') * transient_labels,
+                                                             'n1 n2 c -> n1 c', 'sum')
+                    results['label_fine_transient'] = transient_label_map_
         else:  # no transient field
             rgb_map = reduce(rearrange(weights, 'n1 n2 -> n1 n2 1') * static_rgbs,
                              'n1 n2 c -> n1 c', 'sum')
             if white_back:
                 rgb_map += 1 - rearrange(weights_sum, 'n -> n 1')
             results[f'rgb_{typ}'] = rgb_map
+            if predict_label:
+                label_map = reduce(rearrange(weights, 'n1 n2 -> n1 n2 1') * static_labels,
+                             'n1 n2 c -> n1 c', 'sum')
+                results[f'label_{typ}'] = label_map
 
         results[f'depth_{typ}'] = reduce(weights * z_vals, 'n1 n2 -> n1', 'sum')
         return
@@ -293,7 +326,7 @@ def render_rays(models,
     xyz_coarse = rays_o + rays_d * rearrange(z_vals, 'n1 n2 -> n1 n2 1')
 
     output_transient = False
-    inference(results, models['coarse'], xyz_coarse, z_vals, test_time, **kwargs)
+    inference(results, models['coarse'], xyz_coarse, z_vals, predict_label, num_classes, test_time, **kwargs)
 
     if N_importance > 0:  # sample points for fine model
         z_vals_mid = 0.5 * (z_vals[:, :-1] + z_vals[:, 1:])  # (N_rays, N_samples-1) interval mid points
@@ -316,6 +349,6 @@ def render_rays(models,
             t_embedded = kwargs['t_embedded']
         else:
             t_embedded = embeddings['t'](ts)
-    inference(results, model, xyz_fine, z_vals, test_time, **kwargs)
+    inference(results, model, xyz_fine, z_vals, predict_label, num_classes, test_time, **kwargs)
 
     return results

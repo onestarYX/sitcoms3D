@@ -161,6 +161,14 @@ class RenderDataset(Dataset):
         mask = cv2.resize(mask, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
         return mask
 
+    def get_panoptic_labels(self, id_):
+        panoptic = np.array(Image.open(os.path.join(self.environment_dir, 'segmentations', 'thing',
+                                                '%s.png' % self.id_to_image_path[id_][:-4])))
+        K = self.get_K(id_)
+        img_w, img_h = width_height_from_intr(K)
+        panoptic = cv2.resize(panoptic, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
+        return panoptic
+
     def get_image_paths(self):
         """
         """
@@ -178,6 +186,8 @@ class RenderDataset(Dataset):
             assert os.path.exists(temp)
         image_paths = list(image_paths)
         image_paths = sorted(image_paths)
+        if self.num_limit != -1:
+            image_paths = image_paths[:self.num_limit]
 
         return image_paths
 
@@ -225,7 +235,7 @@ class RenderDataset(Dataset):
 
 class Sitcom3DDataset(RenderDataset):
     def __init__(self, environment_dir, split='train', img_downscale=1,
-                 val_num=1, use_cache=False, near_far_version="cam", read_points=True):
+                 val_num=1, use_cache=False, near_far_version="cam", read_points=True, num_limit=-1):
         """
         img_downscale: how much scale to downsample the training images.
                        The original image sizes are around 500~100, so value of 1 or 2
@@ -256,6 +266,7 @@ class Sitcom3DDataset(RenderDataset):
         self.near_far_version = near_far_version
         self.define_transforms()
 
+        self.num_limit = num_limit
         # print(f"Using near_far_version: {self.near_far_version}")
 
         self.read_meta()
@@ -418,16 +429,21 @@ class Sitcom3DDataset(RenderDataset):
                 self.all_directions = []
                 self.all_rgbs = []
                 self.all_masks = []
+                self.all_labels = []
                 self.all_ray_mask = []
                 for id_ in tqdm(self.img_ids):
                     c2w = torch.FloatTensor(self.get_pose(id_))
                     img = self.get_img(id_)
                     img_h, img_w, _ = img.shape
                     mask = self.get_mask(id_).astype(float)
+                    label = self.get_panoptic_labels(id_).astype(float)
+
                     img = self.transform(img)  # (3, h, w)
                     img = img.view(3, -1).permute(1, 0)  # (h*w, 3) RGB
                     mask = self.transform(mask)
                     mask = mask.view(-1)
+                    label = self.transform(label)
+                    label = label.view(-1).to(torch.long)
 
                     directions = get_ray_directions(img_h, img_w, self.get_K(id_))
                     rays_o, rays_d = get_rays(directions, c2w)
@@ -438,6 +454,7 @@ class Sitcom3DDataset(RenderDataset):
 
                     self.all_rgbs += [img]
                     self.all_masks += [mask]
+                    self.all_labels += [label]
                     temp = torch.cat([rays_o, rays_d,
                                       nears,
                                       fars,
@@ -458,6 +475,7 @@ class Sitcom3DDataset(RenderDataset):
                 self.all_directions = torch.cat(self.all_directions, 0)  # ((N_images-1)*h*w, 5)
                 self.all_rgbs = torch.cat(self.all_rgbs, 0)  # ((N_images-1)*h*w, 3)
                 self.all_masks = torch.cat(self.all_masks, 0)
+                self.all_labels = torch.cat(self.all_labels, 0)
                 self.all_ray_mask = torch.cat(self.all_ray_mask, 0)
 
                 # throw away the pixels that belong to people
@@ -470,10 +488,14 @@ class Sitcom3DDataset(RenderDataset):
                 self.all_directions = self.all_directions[valid_rays]
                 self.all_rgbs = self.all_rgbs[valid_rays]
                 self.all_masks = self.all_masks[valid_rays]
+                self.all_labels = self.all_labels[valid_rays]
                 self.all_ray_mask = self.all_ray_mask[valid_rays]
 
         if self.split in ['val', 'test_train']:  # use the first image as val image (also in train)
-            self.val_id = self.image_path_to_id[self.image_filenames[0]]
+            if self.num_limit != -1:
+                self.val_id = 33
+            else:
+                self.val_id = self.image_path_to_id[self.image_filenames[0]]
         else:  # for testing, create a parametric rendering path
             # test poses and appearance index are defined in eval.py
             pass
@@ -498,13 +520,16 @@ class Sitcom3DDataset(RenderDataset):
                       'ts': self.all_rays[idx, 8].long(),
                       'ts2': self.all_directions[idx, 6].long(),
                       'rgbs': self.all_rgbs[idx],
+                      'labels': self.all_labels[idx],
                       'ray_mask': self.all_rays[idx, 9]}
         elif self.split in ['val', 'test_train']:
             sample = {}
             if self.split == 'val':
-                # id_ = self.val_id
-                val_img_idx = np.random.randint(0, len(self.image_filenames))
-                id_ = self.image_path_to_id[self.image_filenames[val_img_idx]]
+                if self.num_limit != -1:
+                    id_ = self.val_id
+                else:
+                    val_img_idx = np.random.randint(0, len(self.image_filenames))
+                    id_ = self.image_path_to_id[self.image_filenames[val_img_idx]]
             else:
                 id_ = idx_or_id
             sample['c2w'] = c2w = torch.FloatTensor(self.get_pose(id_))
@@ -515,9 +540,13 @@ class Sitcom3DDataset(RenderDataset):
             img = img.view(3, -1).permute(1, 0)  # (h*w, 3) RGB
             sample['rgbs'] = img
 
-            mask = self.get_mask(id_)
+            mask = self.get_mask(id_).astype(float)
             # sample['masks'] = self.transform(mask).view(-1)
             sample['human_mask'] = self.transform(mask).view(-1) < 1.0
+
+            label = self.get_panoptic_labels(id_).astype(float)
+            label = self.transform(label).view(-1)
+            sample['labels'] = label
 
             directions = get_ray_directions(img_h, img_w, self.get_K(id_))
             rays_o, rays_d = get_rays(directions, c2w)
@@ -558,8 +587,12 @@ class Sitcom3DDataset(RenderDataset):
             img = img.view(3, -1).permute(1, 0)  # (h*w, 3) RGB
             sample['rgbs'] = img
 
-            mask = self.get_mask(id_)
+            mask = self.get_mask(id_).astype(float)
             sample['human_mask'] = self.transform(mask).view(-1) < 1.0
+
+            label = self.get_panoptic_labels(id_).astype(float)
+            label = self.transform(label).view(-1)
+            sample['labels'] = label
 
             sample['img_wh'] = torch.LongTensor([W, H])
 

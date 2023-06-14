@@ -106,6 +106,9 @@ class NeRFSystem(LightningModule):
         self.nerf_coarse = NeRF('coarse',
                                 in_channels_xyz=6 * hparams.N_emb_xyz + 3,
                                 in_channels_dir=6 * hparams.N_emb_dir + 3,
+                                encode_appearance=False,
+                                predict_label=self.hparams.predict_label,
+                                num_classes=self.hparams.num_classes,
                                 use_view_dirs=hparams.use_view_dirs)
         self.models = {'coarse': self.nerf_coarse}
         if hparams.N_importance > 0:
@@ -116,6 +119,8 @@ class NeRFSystem(LightningModule):
                                   in_channels_a=hparams.N_a,
                                   encode_transient=hparams.encode_t,
                                   in_channels_t=hparams.N_tau,
+                                  predict_label=self.hparams.predict_label,
+                                  num_classes=self.hparams.num_classes,
                                   beta_min=hparams.beta_min,
                                   use_view_dirs=hparams.use_view_dirs)
             self.models['fine'] = self.nerf_fine
@@ -311,6 +316,8 @@ class NeRFSystem(LightningModule):
                             self.embeddings,
                             rays[i:i + self.hparams.chunk],
                             ts[i:i + self.hparams.chunk],
+                            self.hparams.predict_label,
+                            self.hparams.num_classes,
                             self.hparams.N_samples,
                             self.hparams.use_disp,
                             self.hparams.perturb if version == "train" else 0,
@@ -334,6 +341,7 @@ class NeRFSystem(LightningModule):
         # kwargs['img_downscale'] = self.hparams.img_downscale
         kwargs['val_num'] = self.hparams.num_gpus
         kwargs['use_cache'] = self.hparams.use_cache
+        kwargs['num_limit'] = self.hparams.num_limit
         self.train_dataset = dataset(split='train' if not self.eval_only else 'val',
                                      img_downscale=self.hparams.img_downscale, **kwargs)
         self.val_dataset = dataset(split='val', img_downscale=self.hparams.img_downscale_val, **kwargs)
@@ -403,6 +411,11 @@ class NeRFSystem(LightningModule):
         rgbs, ts = batch['rgbs'], batch['ts']
         results = self.forward(rays, ts, version="train")
         loss_d = self.loss(results, rgbs, ray_mask)
+        if self.hparams.predict_label:
+            label_c = results['label_coarse']
+            loss_d['cce_coarse'] = torch.nn.functional.cross_entropy(label_c, batch['labels'].to(torch.long).squeeze())
+            label_f = results['label_fine']
+            loss_d['cce_fine'] = torch.nn.functional.cross_entropy(label_f, batch['labels'].to(torch.long).squeeze())
         loss = sum(l for l in loss_d.values())
 
         with torch.no_grad():
@@ -425,6 +438,12 @@ class NeRFSystem(LightningModule):
         ts = ts.squeeze()  # (H*W)
         results = self.forward(rays, ts, version="val")
         loss_d = self.loss(results, rgbs, ray_mask)
+        if self.hparams.predict_label:
+            label_c = results['label_coarse']
+            loss_d['cce_coarse'] = torch.nn.functional.cross_entropy(label_c, batch['labels'].to(torch.long).squeeze())
+            label_f = results['label_fine']
+            loss_d['cce_fine'] = torch.nn.functional.cross_entropy(label_f, batch['labels'].to(torch.long).squeeze())
+
         loss = sum(l for l in loss_d.values())
         log = {'val_loss': loss}
         typ = 'fine' if 'rgb_fine' in results else 'coarse'

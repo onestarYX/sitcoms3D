@@ -107,7 +107,8 @@ if __name__ == '__main__':
     models = {'coarse': nerf_coarse, 'fine': nerf_fine}
 
     imgs, psnrs = [], []
-    dir_name = f'{args.environment_dir}/rendering'
+    run_name = args.ckpt_path.split("/")[-4]
+    dir_name = f'{args.environment_dir}/rendering/{run_name}'
     os.makedirs(dir_name, exist_ok=True)
 
 

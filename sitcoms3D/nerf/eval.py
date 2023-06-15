@@ -33,10 +33,8 @@ import imageio
 
 @torch.no_grad()
 def batched_inference(models, embeddings,
-                      rays, ts, N_samples, N_importance, use_disp,
-                      chunk,
-                      white_back,
-                      **kwargs):
+                      rays, ts, predict_label, num_classes, N_samples, N_importance, use_disp,
+                      chunk, white_back, **kwargs):
     """Do batched inference on rays using chunk."""
     B = rays.shape[0]
     results = defaultdict(list)
@@ -46,6 +44,8 @@ def batched_inference(models, embeddings,
                         embeddings,
                         rays[i:i+chunk],
                         ts[i:i+chunk] if ts is not None else None,
+                        predict_label,
+                        num_classes,
                         N_samples,
                         use_disp,
                         0,
@@ -73,7 +73,7 @@ if __name__ == '__main__':
     # kwargs['img_downscale'] = args.img_downscale
     kwargs['val_num'] = 5
     kwargs['use_cache'] = args.use_cache
-    dataset = dataset_name(split='val', img_downscale=args.img_downscale, **kwargs)
+    dataset = dataset_name(split='val', img_downscale=args.img_downscale_val, **kwargs)
 
     embedding_xyz = PosEmbedding(args.N_emb_xyz - 1, args.N_emb_xyz)
     embedding_dir = PosEmbedding(args.N_emb_dir - 1, args.N_emb_dir)
@@ -90,6 +90,9 @@ if __name__ == '__main__':
     nerf_coarse = NeRF('coarse',
                        in_channels_xyz=6 * args.N_emb_xyz + 3,
                        in_channels_dir=6 * args.N_emb_dir + 3,
+                       encode_appearance=False,
+                       predict_label=args.predict_label,
+                       num_classes=args.num_classes,
                        use_view_dirs=args.use_view_dirs).cuda()
     nerf_fine = NeRF('fine',
                      in_channels_xyz=6 * args.N_emb_xyz + 3,
@@ -98,6 +101,8 @@ if __name__ == '__main__':
                      in_channels_a=args.N_a,
                      encode_transient=args.encode_t,
                      in_channels_t=args.N_tau,
+                     predict_label=args.predict_label,
+                     num_classes=args.num_classes,
                      beta_min=args.beta_min,
                      use_view_dirs=args.use_view_dirs).cuda()
 
@@ -111,12 +116,14 @@ if __name__ == '__main__':
     dir_name = f'{args.environment_dir}/rendering/{run_name}'
     os.makedirs(dir_name, exist_ok=True)
 
+    label_colors = np.random.rand(args.num_classes, 3)
 
     for i in tqdm(range(len(dataset))):
         sample = dataset[i]
         rays = sample['rays']
         ts = sample['ts']
         results = batched_inference(models, embeddings, rays.cuda(), ts.cuda(),
+                                    args.predict_label, args.num_classes,
                                     args.N_samples, args.N_importance, args.use_disp,
                                     args.chunk,
                                     dataset.white_back,
@@ -126,15 +133,12 @@ if __name__ == '__main__':
 
         img_pred = np.clip(results['rgb_fine'].view(h, w, 3).cpu().numpy(), 0, 1)
         img_pred_ = (img_pred * 255).astype(np.uint8)
-        # imgs += [img_pred_]
-        # imageio.imwrite(os.path.join(dir_name, f'{i:03d}_pred.png'), img_pred_)
 
         rgbs = sample['rgbs']
         img_gt = rgbs.view(h, w, 3)
         psnrs += [psnr(img_gt, img_pred).item()]
         img_gt_ = np.clip(img_gt.cpu().numpy(), 0, 1)
         img_gt_ = (img_gt_ * 255).astype(np.uint8)
-        # imageio.imwrite(os.path.join(dir_name, f'{i:03d}_gt.png'), img_gt_)
 
         img_static = np.clip(results['rgb_fine_static'].view(h, w, 3).cpu().numpy(), 0, 1)
         img_static_ = (img_static * 255).astype(np.uint8)
@@ -143,9 +147,24 @@ if __name__ == '__main__':
         depth_static = depth_static.reshape(h, w, 1)
         depth_static_ = np.repeat(depth_static, 3, axis=2)
 
+        if args.predict_label:
+            label_gt = label_colors[sample['labels'].to(torch.long).cpu().numpy()].reshape((h, w, 3))
+            label_gt = (label_gt * 255).astype(np.uint8)
+            label_pred = torch.argmax(results['label_fine'], dim=1)
+            label_pred = label_colors[label_pred.to(torch.long).cpu().numpy()].reshape((h, w, 3))
+            label_pred = (label_pred * 255).astype(np.uint8)
+            label_static_pred = torch.argmax(results['label_fine_static'], dim=1)
+            label_static_pred = label_colors[label_static_pred.to(torch.long).cpu().numpy()].reshape((h, w, 3))
+            label_static_pred = (label_static_pred * 255).astype(np.uint8)
+            label_transient_pred = torch.argmax(results['label_fine_transient'], dim=1)
+            label_transient_pred = label_colors[label_transient_pred.to(torch.long).cpu().numpy()].reshape((h, w, 3))
+            label_transient_pred = (label_transient_pred * 255).astype(np.uint8)
+
         row1 = np.concatenate([img_gt_, img_pred_], axis=1)
         row2 = np.concatenate([img_static_, depth_static_], axis=1)
-        res_img = np.concatenate([row1, row2], axis=0)
+        row3 = np.concatenate([label_gt, label_pred], axis=1)
+        row4 = np.concatenate([label_static_pred, label_transient_pred], axis=1)
+        res_img = np.concatenate([row1, row2, row3, row4], axis=0)
         imageio.imwrite(os.path.join(dir_name, f'{i:03d}.png'), res_img)
 
     if psnrs:

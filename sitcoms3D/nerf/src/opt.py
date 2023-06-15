@@ -66,7 +66,7 @@ def get_parser():
     parser.add_argument('--img_wh', nargs="+", type=int, default=[800, 800],
                         help='resolution (img_w, img_h) of the image')
     # for sitcom3D
-    parser.add_argument('--img_downscale', type=int, default=8,
+    parser.add_argument('--img_downscale', type=int, default=4,
                         help='how much to downscale the images for sitcom3D dataset')
     parser.add_argument('--img_downscale_val', type=int, default=4,
                         help='how much to downscale the images for sitcom3D dataset')

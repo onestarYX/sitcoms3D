@@ -6,6 +6,8 @@ import pickle
 from PIL import Image
 from torchvision import transforms as T
 from tqdm import tqdm
+from pathlib import Path
+import json
 
 from .ray_utils import *
 from .colmap_utils import \
@@ -161,9 +163,72 @@ class RenderDataset(Dataset):
         mask = cv2.resize(mask, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
         return mask
 
+    def remap_panoptic_labels(self):
+        json_path = Path('data/sparse_reconstruction_and_nerf_data/HIMYM-red_apartment/panoptic_classes.json')
+        new_cls_list = []
+        with open(json_path) as f:
+            cls_meta = json.load(f)
+            new_cls_list.extend(cls_meta['stuff'])
+            new_cls_list.extend(cls_meta['thing'])
+        new_cls_list.remove('thing')
+        new_cls_list.remove('stuff')
+        redundant_cls_list = []
+        for cls in new_cls_list:
+            if 'floor-' in cls or 'window-' in cls or 'wall-' in cls:
+                redundant_cls_list.append(cls)
+        for redudant_cls in redundant_cls_list:
+            new_cls_list.remove(redudant_cls)
+        print(f"Found {len(new_cls_list)} panoptic classes")
+
+        # Remapping original stuff and thing labels to new class list
+        stuff_cls_list = cls_meta['stuff']
+        thing_cls_list = cls_meta['thing']
+        stuff_cls_mapping = dict()
+        thing_cls_mapping = dict()
+        for i, cls in enumerate(stuff_cls_list):
+            if cls == 'thing':
+                continue
+            if 'floor' in cls:
+                cls = 'floor'
+            if 'window' in cls:
+                cls = 'window'
+            if 'wall' in cls:
+                cls = 'wall'
+            tar_idx = new_cls_list.index(cls)
+            stuff_cls_mapping[i] = tar_idx
+        for i, cls in enumerate(thing_cls_list):
+            if cls == 'stuff':
+                continue
+            tar_idx = new_cls_list.index(cls)
+            thing_cls_mapping[i] = tar_idx
+        return stuff_cls_mapping, thing_cls_mapping
+
     def get_panoptic_labels(self, id_):
-        panoptic = np.array(Image.open(os.path.join(self.environment_dir, 'segmentations', 'thing',
-                                                '%s.png' % self.id_to_image_path[id_][:-4])))
+        # thing: 81, stuff: 54
+        thing = np.array(Image.open(os.path.join(self.environment_dir, 'segmentations', 'thing',
+                                                '%s.png' % self.id_to_image_path[id_][:-4]))).astype(int)
+        stuff = np.array(Image.open(os.path.join(self.environment_dir, 'segmentations', 'stuff',
+                                                '%s.png' % self.id_to_image_path[id_][:-4]))).astype(int)
+        stuff_cls_mapping, thing_cls_mapping = self.remap_panoptic_labels()
+
+        for i in range(thing.shape[0]):
+            for j in range(thing.shape[1]):
+                if thing[i, j] == 0:
+                    continue
+                thing[i, j] = thing_cls_mapping[thing[i, j]]
+
+        for i in range(stuff.shape[0]):
+            for j in range(stuff.shape[1]):
+                if stuff[i, j] == 0:
+                    continue
+                stuff[i, j] = stuff_cls_mapping[stuff[i, j]]
+
+        panoptic = thing
+        for i in range(panoptic.shape[0]):
+            for j in range(panoptic.shape[1]):
+                if panoptic[i, j] == 0:
+                    panoptic[i, j] = stuff[i, j]
+
         K = self.get_K(id_)
         img_w, img_h = width_height_from_intr(K)
         panoptic = cv2.resize(panoptic, (img_w, img_h), interpolation=cv2.INTER_NEAREST)

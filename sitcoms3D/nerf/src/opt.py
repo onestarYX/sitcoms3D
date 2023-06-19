@@ -223,7 +223,7 @@ def get_parser():
     parser.add_argument('--num_limit', type=int, default=-1)
     parser.add_argument('--predict_label', default=False, action='store_true',
                         help='whether to predict object semantic labels')
-    parser.add_argument('--num_classes', type=int, default=80,
+    parser.add_argument('--num_classes', type=int, default=127,
                         help='Number of semantic classes')
 
     return parser

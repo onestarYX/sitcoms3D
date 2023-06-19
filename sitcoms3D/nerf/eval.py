@@ -64,6 +64,18 @@ def batched_inference(models, embeddings,
     return results
 
 
+def compute_iou(pred, gt, num_cls):
+    iou = []
+    for cls_idx in range(num_cls):
+        denom = np.logical_or((pred == cls_idx), (gt == cls_idx)).astype(int).sum()
+        if denom == 0:
+            iou.append(1)
+        else:
+            numer = np.logical_and((pred == cls_idx), (gt == cls_idx)).astype(int).sum()
+            iou.append(numer / denom)
+    return np.mean(iou)
+
+
 if __name__ == '__main__':
     args = get_opts()
     dataset_name = Sitcom3DDataset
@@ -118,6 +130,8 @@ if __name__ == '__main__':
 
     label_colors = np.random.rand(args.num_classes, 3)
 
+    iou_combined = []
+    iou_static = []
     for i in tqdm(range(len(dataset))):
         sample = dataset[i]
         rays = sample['rays']
@@ -148,24 +162,34 @@ if __name__ == '__main__':
         depth_static_ = np.repeat(depth_static, 3, axis=2)
 
         if args.predict_label:
-            label_gt = label_colors[sample['labels'].to(torch.long).cpu().numpy()].reshape((h, w, 3))
-            label_gt = (label_gt * 255).astype(np.uint8)
-            label_pred = torch.argmax(results['label_fine'], dim=1)
-            label_pred = label_colors[label_pred.to(torch.long).cpu().numpy()].reshape((h, w, 3))
-            label_pred = (label_pred * 255).astype(np.uint8)
-            label_static_pred = torch.argmax(results['label_fine_static'], dim=1)
-            label_static_pred = label_colors[label_static_pred.to(torch.long).cpu().numpy()].reshape((h, w, 3))
-            label_static_pred = (label_static_pred * 255).astype(np.uint8)
-            label_transient_pred = torch.argmax(results['label_fine_transient'], dim=1)
-            label_transient_pred = label_colors[label_transient_pred.to(torch.long).cpu().numpy()].reshape((h, w, 3))
-            label_transient_pred = (label_transient_pred * 255).astype(np.uint8)
+            label_gt = sample['labels'].to(torch.long).cpu().numpy()
+            label_map_gt = label_colors[label_gt].reshape((h, w, 3))
+            label_map_gt = (label_map_gt * 255).astype(np.uint8)
+
+            label_pred = torch.argmax(results['label_fine'], dim=1).to(torch.long).cpu().numpy()
+            label_map_pred = label_colors[label_pred].reshape((h, w, 3))
+            label_map_pred = (label_map_pred * 255).astype(np.uint8)
+            iou_combined.append(compute_iou(label_pred, label_gt, args.num_classes))
+
+            label_static_pred = torch.argmax(results['label_fine_static'], dim=1).to(torch.long).cpu().numpy()
+            label_map_static_pred = label_colors[label_static_pred].reshape((h, w, 3))
+            label_map_static_pred = (label_map_static_pred * 255).astype(np.uint8)
+            iou_static.append(compute_iou(label_static_pred, label_gt, args.num_classes))
+
+            label_transient_pred = torch.argmax(results['label_fine_transient'], dim=1).to(torch.long).cpu().numpy()
+            label_map_transient_pred = label_colors[label_transient_pred].reshape((h, w, 3))
+            label_map_transient_pred = (label_map_transient_pred * 255).astype(np.uint8)
 
         row1 = np.concatenate([img_gt_, img_pred_], axis=1)
         row2 = np.concatenate([img_static_, depth_static_], axis=1)
-        row3 = np.concatenate([label_gt, label_pred], axis=1)
-        row4 = np.concatenate([label_static_pred, label_transient_pred], axis=1)
+        row3 = np.concatenate([label_map_gt, label_map_pred], axis=1)
+        row4 = np.concatenate([label_map_static_pred, label_map_transient_pred], axis=1)
         res_img = np.concatenate([row1, row2, row3, row4], axis=0)
         imageio.imwrite(os.path.join(dir_name, f'{i:03d}.png'), res_img)
+
+    if args.predict_label:
+        print('Mean IoU combined', iou_combined)
+        print('Mean IoU static', iou_static)
 
     if psnrs:
         mean_psnr = np.mean(psnrs)

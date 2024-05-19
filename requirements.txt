@@ -12,10 +12,10 @@ kornia==0.4.1
 matplotlib==3.3.3
 mediapy
 networkx==2.5
-open3d==0.12.0
+open3d==0.16.0
 opencv-python==4.5.1.48
 pandas==1.1.5
-plotly==4.14.3
+plotly
 plyfile==0.7.2
 pycollada==0.7.1
 pyglet==1.5.10

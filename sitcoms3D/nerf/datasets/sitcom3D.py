@@ -164,7 +164,7 @@ class RenderDataset(Dataset):
         return mask
 
     def remap_panoptic_labels(self):
-        json_path = Path('data/sparse_reconstruction_and_nerf_data/HIMYM-red_apartment/panoptic_classes.json')
+        json_path = Path('data/sparse_reconstruction_and_nerf_data/TBBT-big_living_room/panoptic_classes.json')
         new_cls_list = []
         with open(json_path) as f:
             cls_meta = json.load(f)
@@ -369,6 +369,12 @@ class Sitcom3DDataset(RenderDataset):
                 self.id_to_image_path = pickle.load(f)
         else:
             image_paths = self.get_image_paths()
+            train_split = int(len(image_paths) * 0.8)
+            if self.split == 'train' or self.split == 'test_train':
+                image_paths = image_paths[:train_split]
+            elif self.split == 'val':
+                image_paths = image_paths[train_split:]
+            self.img_paths = [Path(img_path) for img_path in image_paths]
 
             imdata = read_images_binary(os.path.join(self.environment_dir, 'colmap', 'images.bin'))
             img_path_to_id = {}
@@ -556,14 +562,6 @@ class Sitcom3DDataset(RenderDataset):
                 self.all_labels = self.all_labels[valid_rays]
                 self.all_ray_mask = self.all_ray_mask[valid_rays]
 
-        if self.split in ['val', 'test_train']:  # use the first image as val image (also in train)
-            if self.num_limit != -1:
-                self.val_id = 33
-            else:
-                self.val_id = self.image_path_to_id[self.image_filenames[0]]
-        else:  # for testing, create a parametric rendering path
-            # test poses and appearance index are defined in eval.py
-            pass
 
     def define_transforms(self):
         self.transform = T.ToTensor()
@@ -574,8 +572,7 @@ class Sitcom3DDataset(RenderDataset):
         if self.split == 'test_train':
             return len(self.img_ids)
         if self.split == 'val':
-            return self.val_num
-        return len(self.poses_test)
+            return len(self.img_ids)
 
     def __getitem__(self, idx_or_id):
         if self.split == 'train':  # use data in the buffers
@@ -589,12 +586,8 @@ class Sitcom3DDataset(RenderDataset):
                       'ray_mask': self.all_rays[idx, 9]}
         elif self.split in ['val', 'test_train']:
             sample = {}
-            if self.split == 'val':
-                if self.num_limit != -1:
-                    id_ = self.val_id
-                else:
-                    val_img_idx = np.random.randint(0, len(self.image_filenames))
-                    id_ = self.image_path_to_id[self.image_filenames[val_img_idx]]
+            if self.split == 'val' or self.split == 'test_train':
+                id_ = self.img_ids[idx_or_id]
             else:
                 id_ = idx_or_id
             sample['c2w'] = c2w = torch.FloatTensor(self.get_pose(id_))
@@ -627,38 +620,6 @@ class Sitcom3DDataset(RenderDataset):
             sample['ts2'] = self.id_to_idx[id_] * torch.ones(len(rays), dtype=torch.long)
             sample['img_wh'] = torch.LongTensor([img_w, img_h])
         else:
-            idx = idx_or_id
-            sample = {}
-            sample['c2w'] = c2w = torch.FloatTensor(self.poses_test[idx][:3])
-            K = self.Ks_test[idx]
-            H, W = round(K[1, 2] * 2.0), round(K[0, 2] * 2.0)  # using "round" bc of floating precision
-            directions = get_ray_directions(H, W, K)
-            rays_o, rays_d = get_rays(directions, c2w)
-            # near, far = 0, 5
-            nears, fars, ray_mask = self.get_nears_fars_from_rays_or_cam(rays_o, rays_d, c2w=c2w)
-            rays = torch.cat([rays_o, rays_d,
-                              nears,
-                              fars],
-                             1)
-            id_ = self.appearance_test[idx]
-            sample['rays'] = rays
-            sample['ray_mask'] = ray_mask.squeeze()
-            sample['ts'] = id_ * torch.ones(len(rays), dtype=torch.long)
-            sample['ts2'] = self.id_to_idx[id_] * torch.ones(len(rays), dtype=torch.long)
-
-            img = self.get_img(id_)
-            img_h, img_w, _ = img.shape
-            img = self.transform(img)  # (3, h, w)
-            img = img.view(3, -1).permute(1, 0)  # (h*w, 3) RGB
-            sample['rgbs'] = img
-
-            mask = self.get_mask(id_).astype(float)
-            sample['human_mask'] = self.transform(mask).view(-1) < 1.0
-
-            label = self.get_panoptic_labels(id_).astype(float)
-            label = self.transform(label).view(-1)
-            sample['labels'] = label
-
-            sample['img_wh'] = torch.LongTensor([W, H])
+            raise NotImplementedError
 
         return sample

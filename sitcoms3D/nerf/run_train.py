@@ -57,7 +57,9 @@ from typing import Optional
 # https://github.com/PyTorchLightning/pytorch-lightning/issues/3238#issuecomment-695421373
 
 from sitcoms3D.utils.io import make_dir
-
+import wandb
+import json
+from sitcoms3D.nerf.eval_utils import render_to_path
 
 class DistributedSamplerWrapper(torch.utils.data.distributed.DistributedSampler):
     def __init__(
@@ -342,9 +344,10 @@ class NeRFSystem(LightningModule):
         kwargs['val_num'] = self.hparams.num_gpus
         kwargs['use_cache'] = self.hparams.use_cache
         kwargs['num_limit'] = self.hparams.num_limit
-        self.train_dataset = dataset(split='train' if not self.eval_only else 'val',
+        self.train_dataset = dataset(split='train',
                                      img_downscale=self.hparams.img_downscale, **kwargs)
         self.val_dataset = dataset(split='val', img_downscale=self.hparams.img_downscale_val, **kwargs)
+        self.test_dataset = dataset(split='test_train', img_downscale=self.hparams.img_downscale_val, **kwargs)
 
         # if self.is_learning_pose():
         # NOTE(ethan): self.train_dataset.poses is all the poses, even those in the val dataset
@@ -428,6 +431,16 @@ class NeRFSystem(LightningModule):
             self.log(f'train/{k}', v, prog_bar=True)
         self.log('train/psnr', psnr_, prog_bar=True)
 
+        # wandb log
+        dict_to_log = {}
+        dict_to_log['lr'] = get_learning_rate(self.optimizer)
+        dict_to_log['epoch'] = self.current_epoch
+        dict_to_log['train/loss'] = loss
+        for k, v in loss_d.items():
+            dict_to_log[f"train/{k}"] = v
+        dict_to_log['train/psnr'] = psnr_
+        wandb.log(dict_to_log)
+
         return loss
 
     def validation_step(self, batch, batch_nb):
@@ -445,33 +458,43 @@ class NeRFSystem(LightningModule):
             loss_d['cce_fine'] = torch.nn.functional.cross_entropy(label_f, batch['labels'].to(torch.long).squeeze())
 
         loss = sum(l for l in loss_d.values())
-        log = {'val_loss': loss}
+
+        # Render metrics
+        dict_to_log = {'val/loss': loss}
+        self.log('val/loss', loss, prog_bar=True)
         typ = 'fine' if 'rgb_fine' in results else 'coarse'
-
-        if batch_nb == 0:
-            if self.hparams.dataset_name == 'sitcom3D':
-                WH = batch['img_wh']
-                W, H = WH[0, 0].item(), WH[0, 1].item()
-            else:
-                W, H = self.hparams.img_wh
-            vis_data = {}
-            vis_data.update(results)
-            vis_data["rgbs"] = rgbs
-            vis_data["img_wh"] = [W, H]
-            # image = get_image_summary_from_vis_data(vis_data)
-            # self.logger.experiment.add_image('val/GT_pred_depth', image, self.global_step)
-
         psnr_ = psnr(results[f'rgb_{typ}'], rgbs)
-        log['val_psnr'] = psnr_
+        dict_to_log['val/psnr'] = psnr_
+        self.log('val/psnr', psnr_, prog_bar=True)
+        wandb.log(dict_to_log)
 
-        return log
+        # Render sample images from training set
+        sample_img_idx = self.test_dataset.img_paths[batch_nb].stem
+        render_img_name = f"s={self.global_step:06d}_i={batch_nb:03d}_{sample_img_idx}"
+        print(f"Rendering sample image {render_img_name} from the training set...")
+        render_dir = os.path.join(self.hparams.render_dir, 'train')
+        os.makedirs(render_dir, exist_ok=True)
+        render_path = os.path.join(render_dir, f"{render_img_name}.png")
+        _, res_img = render_to_path(path=render_path, dataset=self.test_dataset,
+                                    idx=batch_nb, models=self.models, embeddings=self.embeddings,
+                                    config=self.hparams)
+        wd_img = wandb.Image(res_img, caption=f"{render_img_name}")
+        wandb.log({f"train_rendering/Renderings_id={batch_nb}": wd_img})
 
-    def validation_epoch_end(self, outputs):
-        mean_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
-        mean_psnr = torch.stack([x['val_psnr'] for x in outputs]).mean()
+        # Render sample images from validation set
+        sample_img_idx = self.val_dataset.img_paths[batch_nb].stem
+        render_img_name = f"s={self.global_step:06d}_i={batch_nb:03d}_{sample_img_idx}"
+        print(f"Rendering sample image {render_img_name} from the validation set...")
+        render_dir = os.path.join(self.hparams.render_dir, 'val')
+        os.makedirs(render_dir, exist_ok=True)
+        render_path = os.path.join(render_dir, f"{render_img_name}.png")
+        _, res_img = render_to_path(path=render_path, dataset=self.val_dataset,
+                                    idx=batch_nb, models=self.models, embeddings=self.embeddings,
+                                    config=self.hparams)
+        wd_img = wandb.Image(res_img, caption=f"{render_img_name}")
+        wandb.log({f"val_rendering/Renderings_id={batch_nb}": wd_img})
 
-        self.log('val/loss', mean_loss)
-        self.log('val/psnr', mean_psnr, prog_bar=True)
+        return dict_to_log
 
     def test_step(self, batch, batch_idx):
         """Run inference on an image. Uses batches
@@ -537,16 +560,20 @@ def main(hparams):
     save_dir = os.path.join(hparams.environment_dir, "runs")
 
     if hparams.resume_name:
-        timedatestring = hparams.resume_name
+        exp_name = hparams.resume_name
+        group_name = exp_name.split('_')[:-1]
+        group_name = '_'.join(group_name) + '_cont'
     else:
-        timedatestring = datetime.datetime.now().strftime("%m-%d-%H-%M-%S")
+        exp_name = hparams.exp_name
 
-    # print(hparams.exp_name)
+        group_name = exp_name
+        time_string = datetime.datetime.now().strftime("%m-%d-%H-%M-%S")
+        exp_name += '_' + time_string
 
     # following pytorch lightning convention here
 
     logger = TestTubeLogger(save_dir=save_dir,
-                            name=timedatestring,
+                            name=exp_name,
                             debug=False,
                             create_git_tag=False,
                             log_graph=False)
@@ -554,18 +581,35 @@ def main(hparams):
     if not isinstance(version, int):
         version = 0
 
-    if hparams.resume_name:
-        assert hparams.ckpt_path is not None
-
     # following pytorch lightning convention here
-    dir_path = os.path.join(save_dir, timedatestring, f"version_{version}")
+    dir_path = os.path.join(save_dir, exp_name, f"version_{version}")
+    os.makedirs(dir_path, exist_ok=True)
+    config = vars(hparams)
+    config_save_path = os.path.join(dir_path, 'config.json')
+    json_obj = json.dumps(config, indent=2)
+    with open(config_save_path, 'w') as f:
+        f.write(json_obj)
+
+    run = wandb.init(
+        # Set the project where this run will be logged
+        project="sitcoms3D",
+        name=exp_name,
+        # Track hyperparameters and run metadata
+        config=config,
+        group=group_name
+    )
+
+    hparams.render_dir = f"{dir_path}/render_logs"
+    os.makedirs(hparams.render_dir, exist_ok=True)
     system = NeRFSystem(hparams)
 
     checkpoint_filepath = os.path.join(f'{dir_path}/ckpts')
     checkpoint_callback = ModelCheckpoint(dirpath=checkpoint_filepath,
                                           monitor='val/psnr',
                                           mode='max',
-                                          save_top_k=-1)
+                                          save_top_k=5,
+                                          save_last=True)
+
 
     trainer = Trainer(max_epochs=hparams.num_epochs,
                       callbacks=[checkpoint_callback],
@@ -576,7 +620,8 @@ def main(hparams):
                       gpus=hparams.num_gpus,
                       accelerator='ddp' if hparams.num_gpus > 1 else None,
                       num_sanity_val_steps=1,
-                      val_check_interval=int(1000),  # run val every int(X) batches
+                      val_check_interval=0.2,  # run val every int(X) batches
+                      limit_val_batches=5,
                       benchmark=True,
                       #   profiler="simple" if hparams.num_gpus == 1 else None
                       )

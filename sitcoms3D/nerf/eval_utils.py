@@ -83,7 +83,7 @@ def compute_iou(pred, gt, num_cls):
     return np.mean(iou)
 
 
-def render_to_path(path, dataset, idx, models, embeddings, config, save_img=False):
+def render_to_path(path, dataset, idx, models, embeddings, all_training_img_ids, config, save_img=False):
     sample = dataset[idx]
     rays = sample['rays']
     ts = sample['ts'].squeeze()
@@ -91,7 +91,7 @@ def render_to_path(path, dataset, idx, models, embeddings, config, save_img=Fals
                                 N_samples=config.N_samples, N_importance=config.N_importance,
                                 use_disp=config.use_disp, chunk=config.chunk,
                                 predict_label=config.predict_label, num_classes=config.num_classes,
-                                white_back=dataset.white_back)
+                                white_back=dataset.white_back, all_img_ids=all_training_img_ids)
 
     rows = []
     metrics = {}

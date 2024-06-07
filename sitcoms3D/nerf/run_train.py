@@ -45,7 +45,7 @@ import cv2
 # pytorch-lightning
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning import LightningModule, Trainer
-from pytorch_lightning.loggers import TestTubeLogger
+from pytorch_lightning.loggers import TensorBoardLogger
 from einops import repeat
 
 from sitcoms3D.nerf.datasets.ray_utils import get_ray_directions, get_rays, get_rays_batch_version
@@ -327,7 +327,8 @@ class NeRFSystem(LightningModule):
                             self.hparams.N_importance,
                             self.hparams.chunk,  # chunk size is effective in val mode
                             self.train_dataset.white_back,
-                            validation_version=version == "val")
+                            test_time=version == "val",
+                            all_img_ids=self.train_dataset.img_ids)
 
             for k, v in rendered_ray_chunks.items():
                 results[k] += [v]
@@ -477,7 +478,7 @@ class NeRFSystem(LightningModule):
         render_path = os.path.join(render_dir, f"{render_img_name}.png")
         _, res_img = render_to_path(path=render_path, dataset=self.test_dataset,
                                     idx=batch_nb, models=self.models, embeddings=self.embeddings,
-                                    config=self.hparams)
+                                    config=self.hparams, all_training_img_ids=self.train_dataset.img_ids)
         wd_img = wandb.Image(res_img, caption=f"{render_img_name}")
         wandb.log({f"train_rendering/Renderings_id={batch_nb}": wd_img})
 
@@ -490,7 +491,7 @@ class NeRFSystem(LightningModule):
         render_path = os.path.join(render_dir, f"{render_img_name}.png")
         _, res_img = render_to_path(path=render_path, dataset=self.val_dataset,
                                     idx=batch_nb, models=self.models, embeddings=self.embeddings,
-                                    config=self.hparams)
+                                    config=self.hparams, all_training_img_ids=self.train_dataset.img_ids)
         wd_img = wandb.Image(res_img, caption=f"{render_img_name}")
         wandb.log({f"val_rendering/Renderings_id={batch_nb}": wd_img})
 
@@ -572,12 +573,8 @@ def main(hparams):
 
     # following pytorch lightning convention here
 
-    logger = TestTubeLogger(save_dir=save_dir,
-                            name=exp_name,
-                            debug=False,
-                            create_git_tag=False,
-                            log_graph=False)
-    version = logger.experiment.version
+    logger = TensorBoardLogger(save_dir=save_dir, name=exp_name)
+    version = 0
     if not isinstance(version, int):
         version = 0
 
@@ -613,17 +610,15 @@ def main(hparams):
 
     trainer = Trainer(max_epochs=hparams.num_epochs,
                       callbacks=[checkpoint_callback],
-                      resume_from_checkpoint=hparams.ckpt_path,
                       logger=logger,
-                      weights_summary=None,
-                      progress_bar_refresh_rate=hparams.refresh_every,
-                      gpus=hparams.num_gpus,
-                      accelerator='ddp' if hparams.num_gpus > 1 else None,
+                      log_every_n_steps=hparams.refresh_every,
+                      num_nodes=hparams.num_gpus,
+                      accelerator='auto',
                       num_sanity_val_steps=1,
-                      val_check_interval=0.2,  # run val every int(X) batches
+                      val_check_interval=0.5,  # run val every int(X) batches
                       limit_val_batches=5,
                       benchmark=True,
-                      #   profiler="simple" if hparams.num_gpus == 1 else None
+                      accumulate_grad_batches=1
                       )
 
     trainer.fit(system)

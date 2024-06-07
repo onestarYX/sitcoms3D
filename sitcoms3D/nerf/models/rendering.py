@@ -119,7 +119,7 @@ def render_rays(models,
     """
 
     def inference(results, model, xyz, z_vals, predict_label=False, num_classes=80,
-                  test_time=False, validation_version=False, **kwargs):
+                  test_time=False, **kwargs):
         """
         Helper function that performs model inference.
         Inputs:
@@ -139,47 +139,42 @@ def render_rays(models,
         # Perform model inference to get rgb and raw sigma
         B = xyz_.shape[0]
         out_chunks = []
-        if typ == 'coarse' and test_time:
-            for i in range(0, B, chunk):
-                xyz_embedded = embedding_xyz(xyz_[i:i + chunk])
-                out_chunks += [model(xyz_embedded, sigma_only=True)]
-            out = torch.cat(out_chunks, 0)
-            static_sigmas = rearrange(out, '(n1 n2) 1 -> n1 n2', n1=N_rays, n2=N_samples_)
-        else:  # infer rgb and sigma and others
-            dir_embedded_ = repeat(dir_embedded, 'n1 c -> (n1 n2) c', n2=N_samples_)
-            # create other necessary inputs
-            if model.encode_appearance:
-                a_embedded_ = repeat(a_embedded, 'n1 c -> (n1 n2) c', n2=N_samples_)
-            if output_transient:
-                t_embedded_ = repeat(t_embedded, 'n1 c -> (n1 n2) c', n2=N_samples_)
-            for i in range(0, B, chunk):
-                # inputs for original NeRF
-                inputs = [embedding_xyz(xyz_[i:i + chunk]), dir_embedded_[i:i + chunk]]
-                # additional inputs for NeRF-W
-                if model.encode_appearance:
-                    inputs += [a_embedded_[i:i + chunk]]
-                if output_transient:
-                    inputs += [t_embedded_[i:i + chunk]]
-                out_chunks += [model(torch.cat(inputs, 1), output_transient=output_transient)]
 
-            out = torch.cat(out_chunks, 0)
-            out = rearrange(out, '(n1 n2) c -> n1 n2 c', n1=N_rays, n2=N_samples_)
-            if predict_label:
-                static_rgbs = out[..., :3]  # (N_rays, N_samples_, 3)
-                static_sigmas = out[..., 3]  # (N_rays, N_samples_)
-                static_labels = out[..., 4:4 + num_classes]  # (N_rays, num_classes)
-                if output_transient:
-                    transient_rgbs = out[..., 4 + num_classes:7 + num_classes]
-                    transient_sigmas = out[..., 7 + num_classes]
-                    transient_betas = out[..., 8 + num_classes]
-                    transient_labels = out[..., 9 + num_classes:]
-            else:
-                static_rgbs = out[..., :3]  # (N_rays, N_samples_, 3)
-                static_sigmas = out[..., 3]  # (N_rays, N_samples_)
-                if output_transient:
-                    transient_rgbs = out[..., 4:7]
-                    transient_sigmas = out[..., 7]
-                    transient_betas = out[..., 8]
+        # infer rgb and sigma and others
+        dir_embedded_ = repeat(dir_embedded, 'n1 c -> (n1 n2) c', n2=N_samples_)
+        # create other necessary inputs
+        if model.encode_appearance:
+            a_embedded_ = repeat(a_embedded, 'n1 c -> (n1 n2) c', n2=N_samples_)
+        if output_transient:
+            t_embedded_ = repeat(t_embedded, 'n1 c -> (n1 n2) c', n2=N_samples_)
+        for i in range(0, B, chunk):
+            # inputs for original NeRF
+            inputs = [embedding_xyz(xyz_[i:i + chunk]), dir_embedded_[i:i + chunk]]
+            # additional inputs for NeRF-W
+            if model.encode_appearance:
+                inputs += [a_embedded_[i:i + chunk]]
+            if output_transient:
+                inputs += [t_embedded_[i:i + chunk]]
+            out_chunks += [model(torch.cat(inputs, 1), output_transient=output_transient)]
+
+        out = torch.cat(out_chunks, 0)
+        out = rearrange(out, '(n1 n2) c -> n1 n2 c', n1=N_rays, n2=N_samples_)
+        if predict_label:
+            static_rgbs = out[..., :3]  # (N_rays, N_samples_, 3)
+            static_sigmas = out[..., 3]  # (N_rays, N_samples_)
+            static_labels = out[..., 4:4 + num_classes]  # (N_rays, num_classes)
+            if output_transient:
+                transient_rgbs = out[..., 4 + num_classes:7 + num_classes]
+                transient_sigmas = out[..., 7 + num_classes]
+                transient_betas = out[..., 8 + num_classes]
+                transient_labels = out[..., 9 + num_classes:]
+        else:
+            static_rgbs = out[..., :3]  # (N_rays, N_samples_, 3)
+            static_sigmas = out[..., 3]  # (N_rays, N_samples_)
+            if output_transient:
+                transient_rgbs = out[..., 4:7]
+                transient_sigmas = out[..., 7]
+                transient_betas = out[..., 8]
 
         # Convert these values using volume rendering
         deltas = z_vals[:, 1:] - z_vals[:, :-1]  # (N_rays, N_samples_-1)
@@ -209,8 +204,6 @@ def render_rays(models,
         results[f'opacity_{typ}'] = weights_sum
         if output_transient:
             results['transient_sigmas'] = transient_sigmas
-        if test_time and typ == 'coarse':
-            return
 
         if output_transient:
             static_rgb_map = reduce(rearrange(static_weights, 'n1 n2 -> n1 n2 1') * static_rgbs,
@@ -241,7 +234,7 @@ def render_rays(models,
                 label_map_fine = static_label_map + transient_label_map
                 results['label_fine'] = label_map_fine
 
-            if test_time or validation_version:
+            if test_time:
                 # Compute also static and transient rgbs when only one field exists.
                 # The result is different from when both fields exist, since the transimttance
                 # will change.
@@ -341,18 +334,22 @@ def render_rays(models,
     if model.encode_appearance:
         if 'a_embedded' in kwargs:
             a_embedded = kwargs['a_embedded']
-        else:
+        elif test_time:
             all_img_ids = torch.tensor(kwargs['all_img_ids'], device=xyz_fine.device)
             a_embedded = embeddings['a'](all_img_ids)
             a_embedded = a_embedded.mean(dim=0, keepdim=True).expand(N_rays, -1)
+        else:
+            a_embedded = embeddings['a'](ts)
     output_transient = kwargs.get('output_transient', True) and model.encode_transient
     if output_transient:
         if 't_embedded' in kwargs:
             t_embedded = kwargs['t_embedded']
-        else:
+        elif test_time:
             all_img_ids = torch.tensor(kwargs['all_img_ids'], device=xyz_fine.device)
             t_embedded = embeddings['t'](all_img_ids)
             t_embedded = t_embedded.mean(dim=0, keepdim=True).expand(N_rays, -1)
+        else:
+            t_embedded = embeddings['t'](ts)
     inference(results, model, xyz_fine, z_vals, predict_label, num_classes, test_time, **kwargs)
 
     return results

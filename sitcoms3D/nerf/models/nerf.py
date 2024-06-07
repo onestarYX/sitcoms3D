@@ -78,15 +78,17 @@ class NeRF(nn.Module):
         self.predict_label = predict_label
 
         # xyz encoding layers
-        for i in range(D):
-            if i == 0:
-                layer = nn.Linear(in_channels_xyz, W)
-            elif i in skips:
-                layer = nn.Linear(W+in_channels_xyz, W)
-            else:
-                layer = nn.Linear(W, W)
-            layer = nn.Sequential(layer, nn.ReLU(True))
-            setattr(self, f"xyz_encoding_{i+1}", layer)
+        self.mlp_base = tcnn.Network(
+            n_input_dims=self.in_channels_xyz,
+            n_output_dims=self.W,
+            network_config={
+                "otype": "FullyFusedMLP",
+                "activation": "ReLU",
+                "output_activation": "None",
+                "n_neurons": 128 if self.W > 128 else self.W,
+                "n_hidden_layers": self.D,
+            },
+        )
         self.xyz_encoding_final = nn.Linear(W, W)
 
         # direction encoding layers
@@ -148,11 +150,7 @@ class NeRF(nn.Module):
                                 self.in_channels_dir+self.in_channels_a], dim=-1)
             
 
-        xyz_ = input_xyz
-        for i in range(self.D):
-            if i in self.skips:
-                xyz_ = torch.cat([input_xyz, xyz_], 1)
-            xyz_ = getattr(self, f"xyz_encoding_{i+1}")(xyz_)
+        xyz_ = self.mlp_base(input_xyz).to(input_xyz.dtype)
 
         static_sigma = self.static_sigma(xyz_) # (B, 1)
         if sigma_only:

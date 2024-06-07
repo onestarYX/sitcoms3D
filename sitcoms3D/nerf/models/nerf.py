@@ -78,17 +78,15 @@ class NeRF(nn.Module):
         self.predict_label = predict_label
 
         # xyz encoding layers
-        self.mlp_base = tcnn.Network(
-            n_input_dims=self.in_channels_xyz,
-            n_output_dims=self.W,
-            network_config={
-                "otype": "FullyFusedMLP",
-                "activation": "ReLU",
-                "output_activation": "None",
-                "n_neurons": 128 if self.W > 128 else self.W,
-                "n_hidden_layers": self.D,
-            },
-        )
+        for i in range(D):
+            if i == 0:
+                layer = nn.Linear(in_channels_xyz, W)
+            elif i in skips:
+                layer = nn.Linear(W+in_channels_xyz, W)
+            else:
+                layer = nn.Linear(W, W)
+            layer = nn.Sequential(layer, nn.ReLU(True))
+            setattr(self, f"xyz_encoding_{i+1}", layer)
         self.xyz_encoding_final = nn.Linear(W, W)
 
         # direction encoding layers
@@ -107,15 +105,17 @@ class NeRF(nn.Module):
 
         if self.encode_transient:
             # transient encoding layers
-            self.transient_encoding = nn.Sequential(
-                                        nn.Linear(W+in_channels_t, W//2), nn.ReLU(True),
-                                        nn.Linear(W//2, W//2), nn.ReLU(True),
-                                        nn.Linear(W//2, W//2), nn.ReLU(True),
-                                        nn.Linear(W//2, W//2), nn.ReLU(True))
-            # transient output layers
-            self.transient_sigma = nn.Sequential(nn.Linear(W//2, 1), nn.Softplus())
-            self.transient_rgb = nn.Sequential(nn.Linear(W//2, 3), nn.Sigmoid())
-            self.transient_beta = nn.Sequential(nn.Linear(W//2, 1), nn.Softplus())
+            self.mlp_transient = tcnn.Network(
+                n_input_dims=self.W + self.in_channels_t,
+                n_output_dims=5,
+                network_config={
+                    "otype": "FullyFusedMLP",
+                    "activation": "ReLU",
+                    "output_activation": "None",
+                    "n_neurons": 128 if self.W > 128 else self.W,
+                    "n_hidden_layers": self.D // 2,
+                },
+            )
             if self.predict_label:
                 self.transient_label = nn.Linear(W//2, num_classes)
 
@@ -148,9 +148,12 @@ class NeRF(nn.Module):
             input_xyz, input_dir_a = \
                 torch.split(x, [self.in_channels_xyz,
                                 self.in_channels_dir+self.in_channels_a], dim=-1)
-            
 
-        xyz_ = self.mlp_base(input_xyz).to(input_xyz.dtype)
+        xyz_ = input_xyz
+        for i in range(self.D):
+            if i in self.skips:
+                xyz_ = torch.cat([input_xyz, xyz_], 1)
+            xyz_ = getattr(self, f"xyz_encoding_{i + 1}")(xyz_)
 
         static_sigma = self.static_sigma(xyz_) # (B, 1)
         if sigma_only:
@@ -176,16 +179,22 @@ class NeRF(nn.Module):
             return static
 
         transient_encoding_input = torch.cat([xyz_encoding_final, input_t], 1)
-        transient_encoding = self.transient_encoding(transient_encoding_input)
-        transient_sigma = self.transient_sigma(transient_encoding) # (B, 1)
-        transient_rgb = self.transient_rgb(transient_encoding) # (B, 3)
-        transient_beta = self.transient_beta(transient_encoding) # (B, 1)
-        if self.predict_label:
-            transient_label = self.transient_label(transient_encoding)
-            transient = torch.cat([transient_rgb, transient_sigma,
-                                   transient_beta, transient_label], 1)  # (B, 5 + num_classes)
-        else:
-            transient = torch.cat([transient_rgb, transient_sigma,
-                                   transient_beta], 1) # (B, 5)
+        transient_out = self.mlp_transient(transient_encoding_input).to(xyz_encoding_final.dtype)
+        transient_rgb = nn.functional.sigmoid(transient_out[:, :3])
+        transient_sigma = nn.functional.softplus(transient_out[:, 3:4])
+        transient_beta = nn.functional.softplus(transient_out[:, 4:])
+        transient = torch.cat([transient_rgb, transient_sigma, transient_beta], 1) # (B, 5)
+
+        # transient_encoding = self.transient_encoding(transient_encoding_input)
+        # transient_sigma = self.transient_sigma(transient_encoding) # (B, 1)
+        # transient_rgb = self.transient_rgb(transient_encoding) # (B, 3)
+        # transient_beta = self.transient_beta(transient_encoding) # (B, 1)
+        # if self.predict_label:
+        #     transient_label = self.transient_label(transient_encoding)
+        #     transient = torch.cat([transient_rgb, transient_sigma,
+        #                            transient_beta, transient_label], 1)  # (B, 5 + num_classes)
+        # else:
+        #     transient = torch.cat([transient_rgb, transient_sigma,
+        #                            transient_beta], 1) # (B, 5)
 
         return torch.cat([static, transient], 1) # (B, 9)

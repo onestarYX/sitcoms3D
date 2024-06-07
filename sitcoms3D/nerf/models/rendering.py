@@ -342,13 +342,17 @@ def render_rays(models,
         if 'a_embedded' in kwargs:
             a_embedded = kwargs['a_embedded']
         else:
-            a_embedded = embeddings['a'](ts)
+            all_img_ids = torch.tensor(kwargs['all_img_ids'], device=xyz_fine.device)
+            a_embedded = embeddings['a'](all_img_ids)
+            a_embedded = a_embedded.mean(dim=0, keepdim=True).expand(N_rays, -1)
     output_transient = kwargs.get('output_transient', True) and model.encode_transient
     if output_transient:
         if 't_embedded' in kwargs:
             t_embedded = kwargs['t_embedded']
         else:
-            t_embedded = embeddings['t'](ts)
+            all_img_ids = torch.tensor(kwargs['all_img_ids'], device=xyz_fine.device)
+            t_embedded = embeddings['t'](all_img_ids)
+            t_embedded = t_embedded.mean(dim=0, keepdim=True).expand(N_rays, -1)
     inference(results, model, xyz_fine, z_vals, predict_label, num_classes, test_time, **kwargs)
 
     return results
